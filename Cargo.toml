@@ -1,5 +1,5 @@
 [package]
-name = "timers"
+name = "hrtimer"
 version = "0.1.0"
 authors = ["me"]
 edition = "2018"
