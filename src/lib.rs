@@ -16,7 +16,7 @@ mod win {
     }
 }
 
-/// Marker type that indicates that high resolution timers are enabled.
+/// Holding an instance of this indicates that high resolution timers are enabled.
 pub struct HrTime {}
 impl HrTime {
     fn init() -> Self {
@@ -25,6 +25,7 @@ impl HrTime {
         HrTime {}
     }
 
+    /// Acquire a reference to the object.
     pub fn get() -> Arc<Self> {
         lazy_static! {
             static ref HR_TIME: Mutex<Weak<HrTime>> = Mutex::default();
@@ -45,5 +46,31 @@ impl Drop for HrTime {
     fn drop(&mut self) {
         #[cfg(windows)]
         assert_eq!(0, unsafe { win::timeEndPeriod(1) });
+    }
+}
+
+#[cfg(test)]
+mod test {
+    use super::HrTime;
+    use std::thread::sleep;
+    use std::time::{Duration, Instant};
+
+    #[test]
+    fn check_delays() {
+        const DELAYS: &[u64] = &[1, 2, 3, 5, 8, 10, 12, 15, 20, 25, 30];
+        let durations = DELAYS.iter().map(|&d| Duration::from_millis(d));
+
+        let _hrt = HrTime::get();
+
+        let mut s = Instant::now();
+        for d in durations {
+            sleep(d);
+            let e = Instant::now();
+            let actual = e - s;
+            let lag = actual - d;
+            println!("sleep({:?}) → {:?} Δ{:?})", d, actual, lag);
+            assert!(lag < Duration::from_millis(2));
+            s = Instant::now();
+        }
     }
 }
