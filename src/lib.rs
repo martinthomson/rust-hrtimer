@@ -373,4 +373,14 @@ mod test {
         one_ms();
         thr.join().unwrap();
     }
+
+    #[test]
+    fn mixed_multi() {
+        let thr = std::thread::spawn(move || {
+            one_ms();
+        });
+        let _hrt = HrTime::get(Duration::from_millis(4));
+        check_delays(Duration::from_millis(5));
+        thr.join().unwrap();
+    }
 }
