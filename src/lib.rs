@@ -1,5 +1,61 @@
-use lazy_static::lazy_static;
-use std::sync::{Arc, Mutex, Weak};
+use std::cell::RefCell;
+use std::cmp::{max, min};
+use std::rc::{Rc, Weak};
+use std::time::Duration;
+use std::convert::TryFrom;
+
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub struct Period(u8);
+impl Period {
+    const MAX: Period = Period(16);
+    const MIN: Period = Period(1);
+
+    #[cfg(windows)]
+    fn as_uint(&self) -> win::UINT {
+        win::UINT::from(self.0)
+    }
+
+    #[cfg(target_os = "macos")]
+    fn scaled(&self, scale: f64) -> f64 {
+        scale * self.0
+    }
+}
+
+impl From<Duration> for Period {
+    fn from(p: Duration) -> Self {
+        let rounded = u8::try_from((p + Duration::from_nanos(999_999)).as_millis()).unwrap();
+        Self(max(Self::MIN.0, min(rounded, Self::MAX.0)))
+    }
+}
+
+#[derive(Default)]
+struct PeriodSet {
+    counts: [usize; (Period::MAX.0 - Period::MIN.0 + 1) as usize],
+}
+impl PeriodSet {
+    fn idx(&mut self, p: Period) -> &mut usize {
+        debug_assert!(p >= Period::MIN);
+        &mut self.counts[usize::from(p.0 - Period::MIN.0)]
+    }
+
+    fn add(&mut self, p: Period) {
+        *self.idx(p) += 1;
+    }
+
+    fn remove(&mut self, p: Period) {
+        debug_assert_ne!(*self.idx(p), 0);
+        *self.idx(p) -= 1;
+    }
+
+    fn min(&self) -> Option<Period> {
+        for (i, v) in self.counts.iter().enumerate() {
+            if *v > 0 {
+                return Some(Period(u8::try_from(i).unwrap() + Period::MIN.0));
+            }
+        }
+        None
+    }
+}
 
 #[cfg(windows)]
 mod win {
@@ -109,20 +165,21 @@ mod mac {
         assert_eq!(r, 0);
     }
 
-    /// Create a realtime policy and set it.
-    pub fn set_realtime() {
+    pub fn get_scale() -> f64 {
         const NANOS_PER_MSEC: f64 = 1_000_000.0;
         let mut timebase_info = mach_timebase_info_data_t::default();
         unsafe {
             mach_timebase_info(&mut timebase_info);
         }
-        let scale =
-            f64::from(timebase_info.denom) * NANOS_PER_MSEC / f64::from(timebase_info.numer);
+        f64::from(timebase_info.denom) * NANOS_PER_MSEC / f64::from(timebase_info.numer)
+    }
 
+    /// Create a realtime policy and set it.
+    pub fn set_realtime(base: f64) {
         let policy = thread_time_constraint_policy {
-            period: scale as u32,               // 1ms interval
-            computation: (scale * 5.0) as u32,  // 5ms of processing expected
-            constraint: (scale * 100.0) as u32, // maximum of 100ms processing
+            period: base as u32,               // Base interval
+            computation: (base * 5.0) as u32,  // Generous allowance
+            constraint: (base * 100.0) as u32, // Even more generous
             preemptible: 1,
         };
         set_thread_policy(policy);
@@ -147,51 +204,115 @@ mod mac {
     }
 }
 
+/// A handle for a high-resolution timer of a specific period.
+pub struct HrPeriod {
+    period: Period,
+    hrt: Rc<RefCell<HrTime>>,
+}
+impl Drop for HrPeriod {
+    fn drop(&mut self) {
+        self.hrt.borrow_mut().remove(self.period);
+    }
+}
+
 /// Holding an instance of this indicates that high resolution timers are enabled.
 pub struct HrTime {
+    periods: PeriodSet,
+    active: Option<Period>,
+
+    #[cfg(target_os = "macos")]
+    scale: f64,
     #[cfg(target_os = "macos")]
     deflt: mac::thread_time_constraint_policy,
 }
 impl HrTime {
-    fn init() -> Self {
+    fn new() -> Self {
         let hrt = HrTime {
+            periods: PeriodSet::default(),
+            active: None,
+
+            #[cfg(target_os = "macos")]
+            scale: mac::get_scale(),
             #[cfg(target_os = "macos")]
             deflt: mac::get_default_policy(),
         };
-
-        #[cfg(target_os = "macos")]
-        mac::set_realtime();
-
-        #[cfg(windows)]
-        assert_eq!(0, unsafe { win::timeBeginPeriod(1) });
-
         hrt
     }
 
-    /// Acquire a reference to the object.
-    pub fn get() -> Arc<Self> {
-        lazy_static! {
-            static ref HR_TIME: Mutex<Weak<HrTime>> = Mutex::default();
+    fn start(&self) {
+        #[cfg(target_os = "macos")]
+        if let Some(p) = self.active {
+            mac::set_realtime(p.scaled(self.scale));
+        } else {
+            mac::set_thread_policy(self.deflt.clone());
         }
 
-        let mut hrt = HR_TIME.lock().unwrap();
-        if let Some(r) = hrt.upgrade() {
-            r
-        } else {
-            let r = Arc::new(Self::init());
-            *hrt = Arc::downgrade(&r);
-            r
+        #[cfg(windows)]
+        if let Some(p) = self.active {
+            assert_eq!(0, unsafe { win::timeBeginPeriod(p.as_uint()) });
         }
+    }
+
+    fn stop(&self) {
+        #[cfg(windows)]
+        if let Some(p) = self.active {
+            assert_eq!(0, unsafe { win::timeEndPeriod(p.as_uint()) });
+        }
+    }
+
+    fn update(&mut self) {
+        let next = self.periods.min();
+        if next != self.active {
+            self.stop();
+            self.active = next;
+            self.start();
+        }
+    }
+
+    fn add(&mut self, p: Period) {
+        self.periods.add(p);
+        self.update();
+    }
+
+    fn remove(&mut self, p: Period) {
+        self.periods.remove(p);
+        self.update();
+    }
+
+    /// Acquire a reference to the object.
+    pub fn get(period: Duration) -> HrPeriod {
+        thread_local! {
+            static HR_TIME: RefCell<Weak<RefCell<HrTime>>> = RefCell::default();
+        }
+
+        HR_TIME.with(|r| {
+            let mut b = r.borrow_mut();
+            let hrt = if let Some(hrt) = b.upgrade() {
+                hrt
+            } else {
+                let hrt = Rc::new(RefCell::new(HrTime::new()));
+                *b = Rc::downgrade(&hrt);
+                hrt
+            };
+
+            let p = Period::from(period);
+            hrt.borrow_mut().add(p);
+            HrPeriod {
+                hrt,
+                period: p,
+            }
+        })
     }
 }
 
 impl Drop for HrTime {
     fn drop(&mut self) {
-        #[cfg(target_os = "macos")]
-        mac::set_thread_policy(self.deflt);
+        self.stop();
 
-        #[cfg(windows)]
-        assert_eq!(0, unsafe { win::timeEndPeriod(1) });
+        #[cfg(target_os = "macos")]
+        if self.active.is_some() {
+            mac::set_thread_policy(self.deflt);
+        }
     }
 }
 
@@ -200,6 +321,11 @@ mod test {
     use super::HrTime;
     use std::thread::sleep;
     use std::time::{Duration, Instant};
+
+    const ONE: Duration = Duration::from_millis(1);
+    const ONE_AND_A_BIT: Duration = Duration::from_micros(1500);
+    /// A limit for when high resolution timers are disabled.
+    const GENEROUS: Duration = Duration::from_millis(30);
 
     fn check_delays(max_lag: Duration) {
         const DELAYS: &[u64] = &[1, 2, 3, 5, 8, 10, 12, 15, 20, 25, 30];
@@ -220,27 +346,31 @@ mod test {
     /// Note that you have to run this test alone or other tests will
     /// grab the high resolution timer and this will run faster.
     #[test]
-    fn baseline_timer() {
-        check_delays(Duration::from_millis(30)); // a generous limit
+    fn baseline() {
+        check_delays(GENEROUS);
     }
 
     #[test]
-    fn hr_timer() {
-        let _hrt = HrTime::get();
-        check_delays(Duration::from_micros(1500)); // not a generous limit
+    fn one_ms() {
+        let _hrt = HrTime::get(ONE);
+        check_delays(ONE_AND_A_BIT);
     }
 
     #[test]
-    fn multithread() {
-        let _hrt = HrTime::get();
-        let h1 = std::thread::spawn(move || {
-            check_delays(Duration::from_micros(1500));
+    fn multithread_baseline() {
+        let thr = std::thread::spawn(move || {
+            baseline();
         });
-        let h2 = std::thread::spawn(move || {
-            check_delays(Duration::from_micros(1500));
+        baseline();
+        thr.join().unwrap();
+    }
+
+    #[test]
+    fn one_ms_multi() {
+        let thr = std::thread::spawn(move || {
+            one_ms();
         });
-        check_delays(Duration::from_micros(1500));
-        h1.join().unwrap();
-        h2.join().unwrap();
+        one_ms();
+        thr.join().unwrap();
     }
 }
