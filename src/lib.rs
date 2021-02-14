@@ -17,7 +17,7 @@ impl Period {
 
     #[cfg(target_os = "macos")]
     fn scaled(&self, scale: f64) -> f64 {
-        scale * self.0
+        scale * f64::from(self.0)
     }
 }
 
