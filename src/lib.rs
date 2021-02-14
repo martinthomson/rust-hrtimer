@@ -211,7 +211,7 @@ mod test {
             let e = Instant::now();
             let actual = e - s;
             let lag = actual - d;
-            println!("sleep({:?}) → {:?} Δ{:?})", d, actual, lag);
+            println!("sleep({:?}) → {:?} Δ{:?}", d, actual, lag);
             assert!(lag < max_lag);
             s = Instant::now();
         }
@@ -228,5 +228,19 @@ mod test {
     fn hr_timer() {
         let _hrt = HrTime::get();
         check_delays(Duration::from_micros(1500)); // not a generous limit
+    }
+
+    #[test]
+    fn multithread() {
+        let _hrt = HrTime::get();
+        let h1 = std::thread::spawn(move || {
+            check_delays(Duration::from_micros(1500));
+        });
+        let h2 = std::thread::spawn(move || {
+            check_delays(Duration::from_micros(1500));
+        });
+        check_delays(Duration::from_micros(1500));
+        h1.join().unwrap();
+        h2.join().unwrap();
     }
 }
