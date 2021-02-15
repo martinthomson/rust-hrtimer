@@ -23,14 +23,16 @@ impl Period {
 
 impl From<Duration> for Period {
     fn from(p: Duration) -> Self {
-        let rounded = u8::try_from((p + Duration::from_nanos(999_999)).as_millis()).unwrap();
+        let rounded =
+            u8::try_from((p + Duration::from_nanos(999_999)).as_millis()).unwrap_or(Self::MAX.0);
         Self(max(Self::MIN.0, min(rounded, Self::MAX.0)))
     }
 }
 
+/// This counts instances of `Period`, except those of `Period::MAX`.
 #[derive(Default)]
 struct PeriodSet {
-    counts: [usize; (Period::MAX.0 - Period::MIN.0 + 1) as usize],
+    counts: [usize; (Period::MAX.0 - Period::MIN.0) as usize],
 }
 impl PeriodSet {
     fn idx(&mut self, p: Period) -> &mut usize {
@@ -39,12 +41,16 @@ impl PeriodSet {
     }
 
     fn add(&mut self, p: Period) {
-        *self.idx(p) += 1;
+        if p != Period::MAX {
+            *self.idx(p) += 1;
+        }
     }
 
     fn remove(&mut self, p: Period) {
-        debug_assert_ne!(*self.idx(p), 0);
-        *self.idx(p) -= 1;
+        if p != Period::MAX {
+            debug_assert_ne!(*self.idx(p), 0);
+            *self.idx(p) -= 1;
+        }
     }
 
     fn min(&self) -> Option<Period> {
@@ -124,7 +130,7 @@ mod mac {
             as mach_msg_type_number_t;
 
     // These function definitions are taken from a comment in <thread_policy.h>.
-    // Why they are inaccessible is unknown, but they can be called still.
+    // Why they are inaccessible is unknown, but they work as declared.
     extern "C" {
         fn thread_policy_set(
             thread: thread_t,
@@ -410,5 +416,11 @@ mod test {
         });
         update();
         thr.join().unwrap();
+    }
+
+    #[test]
+    fn max() {
+        let _hrt = HrTime::get(Duration::from_secs(1));
+        check_delays(GENEROUS);
     }
 }
