@@ -5,7 +5,7 @@ use std::rc::{Rc, Weak};
 use std::time::Duration;
 
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-pub struct Period(u8);
+struct Period(u8);
 impl Period {
     const MAX: Period = Period(16);
     const MIN: Period = Period(1);
@@ -34,6 +34,7 @@ impl From<Duration> for Period {
 struct PeriodSet {
     counts: [usize; (Period::MAX.0 - Period::MIN.0) as usize],
 }
+
 impl PeriodSet {
     fn idx(&mut self, p: Period) -> &mut usize {
         debug_assert!(p >= Period::MIN);
@@ -153,8 +154,6 @@ mod mac {
 
     extern "C" {
         fn pthread_self() -> pthread_t;
-    }
-    extern "C" {
         fn pthread_mach_thread_np(thread: pthread_t) -> mach_port_t;
     }
 
@@ -211,12 +210,12 @@ mod mac {
 }
 
 /// A handle for a high-resolution timer of a specific period.
-pub struct HrPeriod {
+pub struct HrHandle {
     period: Period,
     hrt: Rc<RefCell<HrTime>>,
 }
 
-impl HrPeriod {
+impl HrHandle {
     pub fn update(&mut self, period: Duration) {
         let new = Period::from(period);
         if new != self.period {
@@ -229,7 +228,7 @@ impl HrPeriod {
     }
 }
 
-impl Drop for HrPeriod {
+impl Drop for HrHandle {
     fn drop(&mut self) {
         self.hrt.borrow_mut().remove(self.period);
     }
@@ -299,25 +298,25 @@ impl HrTime {
         self.update();
     }
 
-    /// Acquire a reference to the object.
-    pub fn get(period: Duration) -> HrPeriod {
+    /// Enable high resolution time.  Returns a thread-bound handle that
+    /// needs to be held until the high resolution time is no longer needed.
+    /// The handle can also be used to update the resolution.
+    pub fn get(period: Duration) -> HrHandle {
         thread_local! {
             static HR_TIME: RefCell<Weak<RefCell<HrTime>>> = RefCell::default();
         }
 
         HR_TIME.with(|r| {
             let mut b = r.borrow_mut();
-            let hrt = if let Some(hrt) = b.upgrade() {
-                hrt
-            } else {
+            let hrt = b.upgrade().unwrap_or_else(|| {
                 let hrt = Rc::new(RefCell::new(HrTime::new()));
                 *b = Rc::downgrade(&hrt);
                 hrt
-            };
+            });
 
             let p = Period::from(period);
             hrt.borrow_mut().add(p);
-            HrPeriod { hrt, period: p }
+            HrHandle { hrt, period: p }
         })
     }
 }
