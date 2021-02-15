@@ -1,9 +1,14 @@
+#![deny(warnings, clippy::pedantic)]
+
 use std::cell::RefCell;
 use std::cmp::{max, min};
 use std::convert::TryFrom;
 use std::rc::{Rc, Weak};
 use std::time::Duration;
 
+/// A quantized `Duration`.  This currently just produces 16 discrete values
+/// corresponding to whole milliseconds.  Future implementations might choose
+/// a different allocation, such as a logarithmic scale.
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 struct Period(u8);
 impl Period {
@@ -215,6 +220,8 @@ pub struct HrHandle {
 }
 
 impl HrHandle {
+    /// Update shortcut.  Equivalent to dropping the current reference and
+    /// calling `HrTime::get` again with the new period.
     pub fn update(&mut self, period: Duration) {
         let new = Period::from(period);
         if new != self.period {
@@ -245,7 +252,7 @@ pub struct HrTime {
 }
 impl HrTime {
     fn new() -> Self {
-        let hrt = HrTime {
+        HrTime {
             periods: PeriodSet::default(),
             active: None,
 
@@ -253,10 +260,10 @@ impl HrTime {
             scale: mac::get_scale(),
             #[cfg(target_os = "macos")]
             deflt: mac::get_default_policy(),
-        };
-        hrt
+        }
     }
 
+    #[allow(clippy::unused_self)] // Only on some platforms is it unused.
     fn start(&self) {
         #[cfg(target_os = "macos")]
         if let Some(p) = self.active {
@@ -271,6 +278,7 @@ impl HrTime {
         }
     }
 
+    #[allow(clippy::unused_self)] // Only on some platforms is it unused.
     fn stop(&self) {
         #[cfg(windows)]
         if let Some(p) = self.active {
@@ -300,6 +308,7 @@ impl HrTime {
     /// Enable high resolution time.  Returns a thread-bound handle that
     /// needs to be held until the high resolution time is no longer needed.
     /// The handle can also be used to update the resolution.
+    #[must_use]
     pub fn get(period: Duration) -> HrHandle {
         thread_local! {
             static HR_TIME: RefCell<Weak<RefCell<HrTime>>> = RefCell::default();
@@ -342,7 +351,7 @@ mod test {
     /// A limit for when high resolution timers are disabled.
     const GENEROUS: Duration = Duration::from_millis(30);
 
-    fn check_delays(max_lag: Duration) {
+    fn validate_delays(max_lag: Duration) -> Result<(), ()> {
         const DELAYS: &[u64] = &[1, 2, 3, 5, 8, 10, 12, 15, 20, 25, 30];
         let durations = DELAYS.iter().map(|&d| Duration::from_millis(d));
 
@@ -352,9 +361,21 @@ mod test {
             let e = Instant::now();
             let actual = e - s;
             let lag = actual - d;
-            println!("sleep({:?}) → {:?} Δ{:?}", d, actual, lag);
-            assert!(lag < max_lag);
+            println!("sleep({:?}) \u{2192} {:?} \u{394}{:?}", d, actual, lag);
+            if lag > max_lag {
+                return Err(());
+            }
             s = Instant::now();
+        }
+        Ok(())
+    }
+
+    /// Validate the delays twice.  Sometimes the first run can stall and we want to be
+    /// robust to that.
+    fn check_delays(max_lag: Duration) {
+        if validate_delays(max_lag).is_err() {
+            sleep(Duration::from_millis(50));
+            validate_delays(max_lag).unwrap();
         }
     }
 
