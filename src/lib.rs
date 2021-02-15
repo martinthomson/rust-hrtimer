@@ -1,8 +1,8 @@
 use std::cell::RefCell;
 use std::cmp::{max, min};
+use std::convert::TryFrom;
 use std::rc::{Rc, Weak};
 use std::time::Duration;
-use std::convert::TryFrom;
 
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub struct Period(u8);
@@ -209,6 +209,20 @@ pub struct HrPeriod {
     period: Period,
     hrt: Rc<RefCell<HrTime>>,
 }
+
+impl HrPeriod {
+    pub fn update(&mut self, period: Duration) {
+        let new = Period::from(period);
+        if new != self.period {
+            let mut b = self.hrt.borrow_mut();
+            b.periods.remove(self.period);
+            self.period = new;
+            b.periods.add(self.period);
+            b.update();
+        }
+    }
+}
+
 impl Drop for HrPeriod {
     fn drop(&mut self) {
         self.hrt.borrow_mut().remove(self.period);
@@ -297,10 +311,7 @@ impl HrTime {
 
             let p = Period::from(period);
             hrt.borrow_mut().add(p);
-            HrPeriod {
-                hrt,
-                period: p,
-            }
+            HrPeriod { hrt, period: p }
         })
     }
 }
@@ -319,7 +330,7 @@ impl Drop for HrTime {
 #[cfg(test)]
 mod test {
     use super::HrTime;
-    use std::thread::sleep;
+    use std::thread::{sleep, spawn};
     use std::time::{Duration, Instant};
 
     const ONE: Duration = Duration::from_millis(1);
@@ -358,7 +369,7 @@ mod test {
 
     #[test]
     fn multithread_baseline() {
-        let thr = std::thread::spawn(move || {
+        let thr = spawn(move || {
             baseline();
         });
         baseline();
@@ -367,7 +378,7 @@ mod test {
 
     #[test]
     fn one_ms_multi() {
-        let thr = std::thread::spawn(move || {
+        let thr = spawn(move || {
             one_ms();
         });
         one_ms();
@@ -376,11 +387,28 @@ mod test {
 
     #[test]
     fn mixed_multi() {
-        let thr = std::thread::spawn(move || {
+        let thr = spawn(move || {
             one_ms();
         });
         let _hrt = HrTime::get(Duration::from_millis(4));
         check_delays(Duration::from_millis(5));
+        thr.join().unwrap();
+    }
+
+    #[test]
+    fn update() {
+        let mut hrt = HrTime::get(Duration::from_millis(4));
+        check_delays(Duration::from_millis(5));
+        hrt.update(ONE);
+        check_delays(ONE_AND_A_BIT);
+    }
+
+    #[test]
+    fn update_multi() {
+        let thr = spawn(move || {
+            update();
+        });
+        update();
         thr.join().unwrap();
     }
 }
