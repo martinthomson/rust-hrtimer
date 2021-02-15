@@ -23,8 +23,7 @@ impl Period {
 
 impl From<Duration> for Period {
     fn from(p: Duration) -> Self {
-        let rounded =
-            u8::try_from((p + Duration::from_nanos(999_999)).as_millis()).unwrap_or(Self::MAX.0);
+        let rounded = u8::try_from(p.as_millis()).unwrap_or(Self::MAX.0);
         Self(max(Self::MIN.0, min(rounded, Self::MAX.0)))
     }
 }
